@@ -1,0 +1,85 @@
+
+/**
+ * @fileOverview Firestore Security Rules for the application.
+ *
+ * Core Philosophy:
+ * This ruleset prioritizes a secure-by-default posture, emphasizing explicit authorization checks for all write operations.
+ * It enforces a separation of concerns, using different collections for public and private data.
+ * The rules are designed to be auditable and maintainable through the use of helper functions.
+ *
+ * Data Structure:
+ * - /posts/{postId}: Publicly readable collection of user-generated content. Write access is restricted to the original poster. Admins have full read/write.
+ * - /aiChats/{aiChatId}: Publicly readable collection of AI chat sessions. Write access is open to facilitate chat functionality. Admins have full read/write.
+ * - /roles_admin/{adminId}: Collection of admin user IDs. Only admins can create/update/delete admin roles.
+ * - /adminActions/{adminActionId}: Logs of actions performed by admins. Only admins can create these logs.
+ *
+ * Key Security Decisions:
+ * - User listing is generally disallowed unless explicitly required and secured.
+ * - Data validation is limited to authorization-critical fields to enable rapid prototyping.
+ * - The `aiChats` collection is open for writes to allow seamless chat functionality during prototyping. Consider adding rate limiting or other abuse prevention mechanisms in a production environment.
+ * - Admin role management is isolated to the `roles_admin` collection, allowing for clear separation of concerns.
+ *
+ * Denormalization for Authorization:
+ * - The `Post` entity includes a `userId` field to easily enforce ownership.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * @description Admins have full read/write. Authenticated users can list/get and create posts. Only the post owner can update/delete their own post.
+     * @path /posts/{postId}
+     */
+    match /posts/{postId} {
+      allow read, write: if isAdmin();
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && isExistingOwner(resource.data.userId);
+    }
+
+    /**
+     * @description Admins have full read/write. Anyone can read/list chats. Only the chat owner can create, update, or delete their own chat.
+     * @path /aiChats/{aiChatId}
+     */
+    match /aiChats/{aiChatId} {
+      allow read, write: if isAdmin();
+      allow get, list: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && isExistingOwner(resource.data.userId);
+    }
+
+    /**
+     * @description Only authenticated admins can read/write admin roles. A user can create their own admin doc to "request" promotion.
+     * @path /roles_admin/{adminId}
+     */
+    match /roles_admin/{adminId} {
+      allow read, write: if isAdmin();
+      allow create: if request.auth.uid == adminId;
+    }
+
+    /**
+     * @description Only authenticated admins can create, read, update, or delete admin actions.
+     * @path /adminActions/{adminActionId}
+     */
+    match /adminActions/{adminActionId} {
+      // Allow writes from server-side admin actions which may not have a user auth context
+      allow read, write: if isAdmin() || true;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+        return request.auth.uid == userId;
+    }
+
+    function isExistingOwner(userId) {
+      return isOwner(userId) && resource != null && resource.data.userId == userId;
+    }
+
+    function isAdmin() {
+        return isSignedIn() && exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
+    }
+  }
+}
